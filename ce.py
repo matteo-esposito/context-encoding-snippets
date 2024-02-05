@@ -444,3 +444,86 @@ for batch in dataloader:
     # Use the output as needed
     print("Timm Model Output:", output_timm_model)
 
+
+##### BREAK 7 - detectron2
+
+import torch
+import torchvision.transforms as transforms
+import timm
+from PIL import Image
+from detectron2.config import get_cfg
+from detectron2.engine import DefaultPredictor
+from detectron2.model_zoo import model_zoo
+
+# Function to load a pre-trained timm model with modified input channels
+def load_pretrained_timm_model(model_name, input_channels=4):
+    model = timm.create_model(model_name, pretrained=True)
+    
+    # Modify the first convolutional layer to accept 4 channels
+    if hasattr(model, 'conv1'):
+        model.conv1 = torch.nn.Conv2d(input_channels, model.conv1.out_channels, 
+                                      kernel_size=model.conv1.kernel_size,
+                                      stride=model.conv1.stride,
+                                      padding=model.conv1.padding,
+                                      bias=False)
+    elif hasattr(model, 'features'):
+        model.features[0] = torch.nn.Conv2d(input_channels, model.features[0].out_channels, 
+                                           kernel_size=model.features[0].kernel_size,
+                                           stride=model.features[0].stride,
+                                           padding=model.features[0].padding,
+                                           bias=False)
+    else:
+        raise ValueError("Unsupported model architecture. Modify the input channels manually.")
+
+    return model
+
+# Function to perform panoptic segmentation and concatenate the masks to the original image
+def panoptic_segmentation_and_concat(image_path, timm_model_name):
+    # Load and preprocess the original image
+    original_image = Image.open(image_path).convert('RGB')
+
+    # Transformations for the input image
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),  # Adjust size as needed
+        transforms.ToTensor(),
+    ])
+
+    input_image = transform(original_image).unsqueeze(0)  # Add batch dimension
+
+    # Configure and load Detectron2 Panoptic FPN model
+    cfg = get_cfg()
+    cfg.merge_from_file(model_zoo.get_config_file("COCO-PanopticSegmentation/panoptic_fpn_R_50_3x.yaml"))
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5  # set a threshold for this model
+    cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-PanopticSegmentation/panoptic_fpn_R_50_3x.yaml")
+    panoptic_predictor = DefaultPredictor(cfg)
+
+    # Perform inference on the original image using Detectron2
+    with torch.no_grad():
+        panoptic_result = panoptic_predictor(original_image)
+
+    # Extract panoptic segmentation masks
+    panoptic_mask = panoptic_result["panoptic_seg"][0].numpy()
+
+    # Normalize the panoptic mask to the range [0, 1]
+    panoptic_mask = panoptic_mask / panoptic_mask.max()
+
+    # Convert the panoptic mask to a tensor
+    panoptic_mask_tensor = torch.FloatTensor(panoptic_mask)
+
+    # Concatenate the panoptic mask to the original image as a new channel
+    input_with_mask = torch.cat([input_image, panoptic_mask_tensor.unsqueeze(0)], dim=1)
+
+    # Load a pre-trained timm model with modified input channels
+    timm_model = load_pretrained_timm_model(timm_model_name, input_channels=4)
+
+    # Forward pass through the timm model using the image with the concatenated mask
+    with torch.no_grad():
+        output_timm_model = timm_model(input_with_mask)
+
+    # Use the output as needed
+    print("Timm Model Output:", output_timm_model)
+
+# Example usage
+panoptic_segmentation_and_concat("example_image.jpg", "resnet50")
+
+
